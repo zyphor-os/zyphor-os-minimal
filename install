@@ -1,0 +1,406 @@
+#!/bin/sh
+# =============================================================================
+#  MyOS Installer
+#  Supports: QEMU / VirtualBox / VMware + Real Hardware (BIOS + UEFI)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# OS Identity Variables
+# -----------------------------------------------------------------------------
+OS_NAME="MyOS"
+OS_FIRST="OS"
+OS_SECOND="Server"
+OS_HOSTNAME="MyOS"
+OS_HISTORY="myos_history"
+OS_LABEL="MyOS"
+
+MOUNT="/mnt"
+
+# -----------------------------------------------------------------------------
+# Check required tools
+# -----------------------------------------------------------------------------
+for tool in fdisk mkfs.ext4 mount cp lsblk; do
+    if ! command -v "$tool" > /dev/null 2>&1; then
+        echo "[ERROR] Missing required tool: $tool"
+        exit 1
+    fi
+done
+
+# -----------------------------------------------------------------------------
+# Auto-detect disk
+# -----------------------------------------------------------------------------
+echo "[$OS_NAME] Detecting available disks..."
+lsblk -d -o NAME,SIZE,TYPE | grep disk
+
+echo ""
+printf "Enter disk to install to (e.g. sda, nvme0n1, vda): /dev/"
+read DISKNAME
+DISK="/dev/$DISKNAME"
+
+case "$DISK" in
+    *nvme*|*mmcblk*) PART="${DISK}p1" ;;
+    *)               PART="${DISK}1"  ;;
+esac
+
+echo "[$OS_NAME] Selected disk : $DISK"
+echo "[$OS_NAME] Partition     : $PART"
+
+# -----------------------------------------------------------------------------
+# Check disk exists
+# -----------------------------------------------------------------------------
+if [ ! -b "$DISK" ]; then
+    echo "[ERROR] Disk $DISK not found."
+    exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# Safety check — make sure /mnt is free
+# -----------------------------------------------------------------------------
+if mountpoint -q "$MOUNT"; then
+    echo "[ERROR] $MOUNT is already mounted. Unmount it first."
+    exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# Detect BIOS or UEFI
+# -----------------------------------------------------------------------------
+if [ -d /sys/firmware/efi ]; then
+    BOOT_MODE="uefi"
+    echo "[$OS_NAME] Boot mode: UEFI"
+else
+    BOOT_MODE="bios"
+    echo "[$OS_NAME] Boot mode: BIOS/Legacy"
+fi
+
+# -----------------------------------------------------------------------------
+# Confirm
+# -----------------------------------------------------------------------------
+echo ""
+echo "======================================"
+echo "  WARNING: This will ERASE $DISK"
+echo "  Partition : $PART"
+echo "  Boot mode : $BOOT_MODE"
+echo "======================================"
+printf "Type YES to continue: "
+read confirm
+[ "$confirm" != "YES" ] && echo "Aborted." && exit 1
+
+# -----------------------------------------------------------------------------
+# 1. Partition
+# -----------------------------------------------------------------------------
+echo "[1/9] Partitioning $DISK..."
+
+if [ "$BOOT_MODE" = "uefi" ]; then
+    printf "g\nn\n1\n\n+512M\nt\n1\nn\n2\n\n\nw\n" | fdisk "$DISK"
+    case "$DISK" in
+        *nvme*|*mmcblk*) EFI_PART="${DISK}p1" ; PART="${DISK}p2" ;;
+        *)               EFI_PART="${DISK}1"  ; PART="${DISK}2"  ;;
+    esac
+else
+    printf "o\nn\np\n1\n\n\na\nw\n" | fdisk "$DISK"
+fi
+
+sleep 2
+
+# -----------------------------------------------------------------------------
+# 2. Format
+# -----------------------------------------------------------------------------
+echo "[2/9] Formatting partitions..."
+
+if [ "$BOOT_MODE" = "uefi" ]; then
+    mkfs.fat -F32 "$EFI_PART"
+    echo "[$OS_NAME] Formatted EFI partition : $EFI_PART"
+fi
+
+mkfs.ext4 -F -L "$OS_LABEL" "$PART"
+echo "[$OS_NAME] Formatted root partition: $PART"
+
+# -----------------------------------------------------------------------------
+# 3. Mount
+# -----------------------------------------------------------------------------
+echo "[3/9] Mounting..."
+mkdir -p "$MOUNT"
+mount "$PART" "$MOUNT"
+
+if [ "$BOOT_MODE" = "uefi" ]; then
+    mkdir -p "$MOUNT/boot/efi"
+    mount "$EFI_PART" "$MOUNT/boot/efi"
+fi
+
+# -----------------------------------------------------------------------------
+# 4. Copy rootfs
+# -----------------------------------------------------------------------------
+echo "[4/9] Copying system files..."
+for dir in bin sbin usr lib lib64 etc root home var; do
+    if [ -d "/$dir" ]; then
+        echo "  Copying /$dir..."
+        cp -a "/$dir" "$MOUNT/"
+    fi
+done
+
+mkdir -p "$MOUNT/proc"
+mkdir -p "$MOUNT/sys"
+mkdir -p "$MOUNT/dev"
+mkdir -p "$MOUNT/run"
+mkdir -p "$MOUNT/mnt"
+mkdir -p "$MOUNT/tmp"
+chmod 1777 "$MOUNT/tmp"
+
+mkdir -p "$MOUNT/boot"
+[ -f /boot/vmlinuz ]   && cp /boot/vmlinuz   "$MOUNT/boot/"
+[ -f /boot/initramfs ] && cp /boot/initramfs "$MOUNT/boot/"
+
+# -----------------------------------------------------------------------------
+# 5. Install lolcat and figlet
+# -----------------------------------------------------------------------------
+echo "[5/9] Installing lolcat and figlet..."
+
+if command -v apk > /dev/null 2>&1; then
+    apk add --root "$MOUNT" --no-cache figlet lolcat 2>/dev/null || \
+    apk add --no-cache figlet lolcat && \
+        cp "$(command -v figlet)" "$MOUNT/usr/bin/figlet" && \
+        cp "$(command -v lolcat)" "$MOUNT/usr/bin/lolcat"
+elif command -v apt-get > /dev/null 2>&1; then
+    apt-get install -y figlet lolcat > /dev/null 2>&1
+    for bin in figlet lolcat; do
+        BIN_PATH="$(command -v $bin 2>/dev/null)"
+        [ -n "$BIN_PATH" ] && cp "$BIN_PATH" "$MOUNT/usr/bin/$bin"
+    done
+else
+    echo "[WARN] Could not auto-install lolcat/figlet — copying binaries if present."
+    for bin in figlet lolcat; do
+        BIN_PATH="$(command -v $bin 2>/dev/null)"
+        [ -n "$BIN_PATH" ] && cp "$BIN_PATH" "$MOUNT/usr/bin/$bin" && \
+            echo "  Copied $bin -> $MOUNT/usr/bin/$bin"
+    done
+fi
+
+if command -v lolcat > /dev/null 2>&1; then
+    GEM_DIR="$(gem environment gemdir 2>/dev/null)"
+    [ -n "$GEM_DIR" ] && [ -d "$GEM_DIR" ] && \
+        mkdir -p "$MOUNT/$GEM_DIR" && \
+        cp -a "$GEM_DIR/." "$MOUNT/$GEM_DIR/" 2>/dev/null || true
+fi
+
+for FDIR in /usr/share/figlet /usr/share/figlet/fonts /usr/local/share/figlet; do
+    if [ -d "$FDIR" ]; then
+        mkdir -p "$MOUNT$FDIR"
+        cp -a "$FDIR/." "$MOUNT$FDIR/" 2>/dev/null || true
+        break
+    fi
+done
+
+# -----------------------------------------------------------------------------
+# 6. Create /sbin/init on installed system
+# -----------------------------------------------------------------------------
+echo "[6/9] Creating /sbin/init..."
+mkdir -p "$MOUNT/sbin"
+cat > "$MOUNT/sbin/init" << INIT
+#!/bin/sh
+# =============================================================================
+#  $OS_NAME /sbin/init  —  Installed system init (runs after switch_root)
+# =============================================================================
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+OS_NAME="$OS_NAME"
+OS_FIRST="$OS_FIRST"
+OS_SECOND="$OS_SECOND"
+OS_HOSTNAME="$OS_HOSTNAME"
+
+mount -t proc     proc     /proc
+mount -t sysfs    sysfs    /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+
+[ ! -e /dev/console ] && mknod -m 600 /dev/console c 5 1
+[ ! -e /dev/null ]    && mknod -m 666 /dev/null    c 1 3
+[ ! -e /dev/tty ]     && mknod -m 666 /dev/tty     c 5 0
+
+mount -t tmpfs tmpfs /run
+mkdir -p /run/dhcpcd
+mkdir -p /run/lock
+mkdir -p /run/udev
+
+echo 1 > /proc/sys/kernel/sysrq
+
+echo "\$OS_HOSTNAME" > /etc/hostname
+printf "127.0.0.1   localhost\n127.0.1.1   \$OS_HOSTNAME\n" > /etc/hosts
+hostname "\$OS_HOSTNAME"
+
+ip link set lo up 2>/dev/null
+
+for iface in eth0 ens3 ens33 enp0s3 enp1s0; do
+    if ip link show "\$iface" > /dev/null 2>&1; then
+        echo "[\$OS_NAME] Bringing up \$iface..."
+        ip link set "\$iface" up
+        dhcpcd "\$iface" &
+        break
+    fi
+done
+
+echo "root:root" | chpasswd 2>/dev/null
+
+show_banner() {
+    clear
+    if command -v figlet > /dev/null 2>&1 && command -v lolcat > /dev/null 2>&1; then
+        figlet -f slant "\$OS_FIRST" | lolcat
+        figlet -f small "  \$OS_SECOND" | lolcat
+        printf "\n"
+        printf "  Kernel : %s\n" "\$(uname -r)"          | lolcat
+        printf "  Date   : %s\n" "\$(date '+%F  %T')"    | lolcat
+        printf "  Host   : %s\n" "\$OS_NAME"              | lolcat
+        printf "\n"
+        printf "  Type 'help' for available commands.\n"  | lolcat
+        printf "\n"
+    else
+        echo "======================================"
+        echo "         \$OS_NAME Minimal OS"
+        echo "======================================"
+        echo " Kernel: \$(uname -r)"
+        echo " Date  : \$(date)"
+        echo "======================================"
+        echo ""
+        echo "[\$OS_NAME] System ready."
+        echo ""
+    fi
+}
+
+show_banner
+
+while true; do
+    /bin/login
+    echo ""
+    show_banner
+    sleep 1
+done
+INIT
+chmod +x "$MOUNT/sbin/init"
+
+# -----------------------------------------------------------------------------
+# 7. Configure /etc/profile
+# -----------------------------------------------------------------------------
+echo "[7/9] Configuring shell profile..."
+cat > "$MOUNT/etc/profile" << PROFILE
+# =============================================================================
+#  $OS_NAME /etc/profile  —  Login shell configuration
+# =============================================================================
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export TERM=xterm-256color
+export EDITOR=vi
+export PAGER=more
+export HISTSIZE=500
+export HISTFILE=~/.${OS_HISTORY}
+
+OS_NAME="$OS_NAME"
+OS_FIRST="$OS_FIRST"
+OS_SECOND="$OS_SECOND"
+OS_HOSTNAME="$OS_HOSTNAME"
+
+RED='\[\033[0;31m\]'
+GRN='\[\033[0;32m\]'
+CYN='\[\033[0;36m\]'
+YLW='\[\033[0;33m\]'
+RST='\[\033[0m\]'
+export PS1="\${CYN}[\${GRN}\u\${CYN}@\${YLW}\$OS_HOSTNAME \${CYN}\w\${CYN}]\${RED}\\\$\${RST} "
+
+alias ls='ls --color=auto'
+alias ll='ls -lAh --color=auto'
+alias la='ls -A --color=auto'
+alias grep='grep --color=auto'
+alias ip='ip -c'
+alias reboot='reboot'
+alias poweroff='poweroff'
+alias shutdown='poweroff'
+
+if command -v figlet > /dev/null 2>&1 && command -v lolcat > /dev/null 2>&1; then
+    clear
+    figlet -f slant "\$OS_FIRST" | lolcat
+    figlet -f small "  \$OS_SECOND" | lolcat
+    printf "\n"
+    printf "  Kernel : %s\n" "\$(uname -r)"          | lolcat
+    printf "  Date   : %s\n" "\$(date '+%F  %T')"    | lolcat
+    printf "  Host   : %s\n" "\$OS_NAME"              | lolcat
+    printf "  Uptime : %s\n" "\$(uptime -p 2>/dev/null || uptime)" | lolcat
+    printf "\n"
+    printf "  Type 'help' for available commands.\n"  | lolcat
+    printf "\n"
+fi
+
+[ -f "\$HOME/.profile" ] && . "\$HOME/.profile"
+PROFILE
+
+# -----------------------------------------------------------------------------
+# 8. Create reboot / poweroff / shutdown commands
+# -----------------------------------------------------------------------------
+echo "[8/9] Creating reboot/poweroff commands..."
+
+cat > "$MOUNT/bin/reboot" << EOF
+#!/bin/sh
+echo "[$OS_NAME] Rebooting..."
+sync
+echo b > /proc/sysrq-trigger
+EOF
+chmod +x "$MOUNT/bin/reboot"
+
+cat > "$MOUNT/bin/poweroff" << EOF
+#!/bin/sh
+echo "[$OS_NAME] Powering off..."
+sync
+echo o > /proc/sysrq-trigger
+EOF
+chmod +x "$MOUNT/bin/poweroff"
+
+ln -sf /bin/poweroff "$MOUNT/bin/shutdown"
+
+# -----------------------------------------------------------------------------
+# 9. Install GRUB + write config
+# -----------------------------------------------------------------------------
+echo "[9/9] Installing GRUB..."
+
+if command -v grub-install > /dev/null 2>&1; then
+    if [ "$BOOT_MODE" = "uefi" ]; then
+        grub-install \
+            --target=x86_64-efi \
+            --efi-directory="$MOUNT/boot/efi" \
+            --boot-directory="$MOUNT/boot" \
+            --removable \
+            --recheck \
+            "$DISK"
+    else
+        grub-install \
+            --target=i386-pc \
+            --boot-directory="$MOUNT/boot" \
+            --recheck \
+            "$DISK"
+    fi
+else
+    echo "[WARN] grub-install not found — skipping GRUB installation."
+fi
+
+mkdir -p "$MOUNT/boot/grub"
+cat > "$MOUNT/boot/grub/grub.cfg" << GRUBCFG
+set timeout=3
+set default=0
+
+menuentry "$OS_NAME" {
+    linux  /boot/vmlinuz root=$PART rw quiet
+    initrd /boot/initramfs
+}
+GRUBCFG
+
+# -----------------------------------------------------------------------------
+# Done
+# -----------------------------------------------------------------------------
+sync
+
+if [ "$BOOT_MODE" = "uefi" ]; then
+    umount "$MOUNT/boot/efi"
+fi
+umount "$MOUNT"
+
+echo ""
+echo "======================================"
+echo "  Installation complete!"
+echo "  Reboot and remove install media."
+echo "======================================"
