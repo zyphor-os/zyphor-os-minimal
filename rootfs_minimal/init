@@ -1,0 +1,28 @@
+#!/bin/sh
+
+# Minimal init for MyOS
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+# Mount essential filesystems
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+
+# Ensure console exists
+[ -e /dev/console ] || mknod /dev/console c 5 1
+
+# Redirect input/output to console
+exec 0</dev/console
+exec 1>/dev/console
+exec 2>/dev/console
+
+clear
+
+echo ""
+echo "================================"
+echo "        MyOS Minimal Init"
+echo "================================"
+echo ""
+
+# Start shell as PID 1
+exec /bin/sh
