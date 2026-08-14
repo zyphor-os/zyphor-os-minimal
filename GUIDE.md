@@ -19,7 +19,7 @@ sudo apt install build-essential bc bison flex libssl-dev libelf-dev dwarves pkg
 ## Step 1: Clone this Repository
 
 ```bash
-git clone https://github.com/markjasonespelita/zyphor_minimal
+git clone https://github.com/zyphor-os/zyphor-os-minimal
 ```
 
 ---
@@ -28,10 +28,10 @@ git clone https://github.com/markjasonespelita/zyphor_minimal
 
 ## Step 2: Clone the Linux Kernel Source Code
 
-Navigate to the `kernel` directory inside the `zyphor_minimal` project folder and clone the Linux kernel source code.
+Navigate to the `kernel` directory inside the `zyphor-os-minimal` project folder and clone the Linux kernel source code.
 
 ```bash
-cd zyphor_minimal/kernel
+cd zyphor-os-minimal/kernel
 
 git clone --depth=1 https://github.com/torvalds/linux
 ```
@@ -120,7 +120,7 @@ Now let’s create a simple `initramfs` file, which will serve as the temporary 
 
 ```bash
 cd ../../
-# You should now be inside the zyphor_minimal folder
+# You should now be inside the zyphor-os-minimal folder
 
 cd rootfs_minimal
 
@@ -138,7 +138,7 @@ In this step, we are packaging the contents of the `rootfs_minimal` directory in
 ### Command Breakdown
 
 #### `cd ../../`
-Moves two directories backward to return to the main `zyphor_minimal` project folder.
+Moves two directories backward to return to the main `zyphor-os-minimal` project folder.
 
 #### `cd rootfs_minimal`
 Enters the minimal root filesystem directory that contains the essential Linux filesystem structure and initialization files.
@@ -157,7 +157,7 @@ Compresses the generated archive using gzip and saves the final compressed initr
 
 After this step, the generated `initramfs` file will be used together with the Linux kernel (`bzImage`) by the bootloader to start the operating system.
 
-You should now have these two important files inside the `zyphor_minimal` folder:
+You should now have these two important files inside the `zyphor-os-minimal` folder:
 
 1. `kernel/linux/arch/x86/boot/bzImage` — The compiled Linux kernel image.
 2. `initramfs` — The compressed initial RAM filesystem.
@@ -166,7 +166,7 @@ You should now have these two important files inside the `zyphor_minimal` folder
 
 # Bootloader
 
-Now let’s configure the `/bootloader` directory inside the `zyphor_minimal` project.
+Now let’s configure the `/bootloader` directory inside the `zyphor-os-minimal` project.
 
 ## Step 7: Copy the Kernel Into the Bootloader Directory
 
